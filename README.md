@@ -5,5 +5,5 @@ comentários dos posts vigiados (Instagram + Facebook) e, quando muda, repassa o
 palavra-chave pro Disparador (n8n), no mesmo formato do webhook da Meta.
 
 Env: `DATABASE_URL` (obrigatório), `DISPARADOR_URL`, `INTERVALO_S` (10), `JANELA_RESPOSTA_H` (24),
-`QUENTE_DIAS` (60), `PAUSADO` (true/false), `IG_ID`, `FB_PAGE_ID`. Nenhum segredo no código.
+`QUENTE_DIAS` (60), `VIGIAR_IG` (false — o webhook da Meta já cobre o IG), `VIGIAR_FB` (true), `PAUSADO` (true/false), `IG_ID`, `FB_PAGE_ID`. Nenhum segredo no código.
 `GET /` devolve o estado (ciclos, repassados, erros).

@@ -16,6 +16,10 @@ const FB_PAGE = ENV.FB_PAGE_ID || '1753378231566500';
 const JANELA_H = Number(ENV.JANELA_RESPOSTA_H || 24);     // comentário mais velho que isso não é respondido
 const QUENTE_DIAS = Number(ENV.QUENTE_DIAS || 60);        // post antigo sai da vigia após N dias sem comentário
 const G = 'https://graph.facebook.com/v21.0/';
+// Instagram: com o app Motor publicado, a Meta já entrega o webhook de comentário direto pro Disparador.
+// Vigiar o IG aqui também faria responder em dobro → desligado por padrão (VIGIAR_IG=true só se o webhook falhar).
+const VIGIAR_IG = (ENV.VIGIAR_IG || 'false').toLowerCase() === 'true';
+const VIGIAR_FB = (ENV.VIGIAR_FB || 'true').toLowerCase() === 'true';
 
 const estado = { inicio: new Date().toISOString(), ciclos: 0, repassados: 0, erros: 0, ultimoErro: null, ultimoCiclo: null, pausado: false, vigiados: 0 };
 const log = (...a) => console.log(new Date().toISOString(), ...a);
@@ -102,10 +106,13 @@ async function processarPost(rede, postId, primeiraVez) {
 async function ciclo() {
   await carregar();
   // Instagram: recentes (1 pedido) + quentes (1 pedido a cada 50)
+  if (VIGIAR_IG) {
   const rec = (await get(`${G}${IG_ID}/media?fields=id,comments_count,timestamp,caption&limit=30&access_token=${tk.leitorIG}`)).data || [];
   for (const m of rec) await upsertPost('instagram', m.id, 'recente', m.timestamp, m.caption);
   await checarContagens('instagram', Object.fromEntries(rec.map(m => [m.id, m.comments_count])), id => `${G}?ids=${id}&fields=comments_count&access_token=${tk.leitorIG}`, x => x.comments_count);
+  }
   // Facebook: recentes + quentes
+  if (!VIGIAR_FB) return;
   const fb = (await get(`${G}${FB_PAGE}/feed?fields=id,created_time,message,comments.summary(true).limit(0)&limit=30&access_token=${tk.pagina}`)).data || [];
   for (const p of fb) await upsertPost('facebook', p.id, 'recente', p.created_time, p.message);
   await checarContagens('facebook', Object.fromEntries(fb.map(p => [p.id, p.comments && p.comments.summary ? p.comments.summary.total_count : 0])), id => `${G}?ids=${id}&fields=comments.summary(true).limit(0)&access_token=${tk.pagina}`, x => x.comments && x.comments.summary ? x.comments.summary.total_count : 0);
@@ -160,7 +167,7 @@ async function laco() {
     try {
       estado.pausado = (ENV.PAUSADO || '').toLowerCase() === 'true';
       if (!estado.pausado) {
-        if (Date.now() > proximaRevisao) { proximaRevisao = Date.now() + 24 * 3600e3; revisaoDiaria().catch(e => { estado.erros++; estado.ultimoErro = 'revisao: ' + e.message; log('erro revisão', e.message); }); }
+        if (VIGIAR_IG && Date.now() > proximaRevisao) { proximaRevisao = Date.now() + 24 * 3600e3; revisaoDiaria().catch(e => { estado.erros++; estado.ultimoErro = 'revisao: ' + e.message; log('erro revisão', e.message); }); }
         await ciclo();
         estado.ciclos++; estado.ultimoCiclo = new Date().toISOString();
         if (estado.ciclos % 60 === 1) log('vivo — ciclos', estado.ciclos, 'vigiados', estado.vigiados, 'repassados', estado.repassados, 'erros', estado.erros, 'ciclo levou', Date.now() - t0, 'ms');
@@ -174,5 +181,5 @@ async function laco() {
 }
 
 http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(estado)); }).listen(Number(ENV.PORT || 8000));
-log('vigia-comentarios no ar — intervalo', INTERVALO / 1000, 's');
+log('vigia-comentarios no ar — intervalo', INTERVALO / 1000, 's | IG', VIGIAR_IG, '| FB', VIGIAR_FB);
 laco();
