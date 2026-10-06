@@ -113,18 +113,22 @@ async function ciclo() {
   }
   // Facebook: recentes + quentes
   if (!VIGIAR_FB) return;
-  const fb = (await get(`${G}${FB_PAGE}/feed?fields=id,created_time,message,comments.summary(true).limit(0)&limit=30&access_token=${tk.pagina}`)).data || [];
+  // feed em 2 páginas de 15 (lote maior a API recusa); FB só vigia os 30 recentes (consulta por vários ids foi descontinuada)
+  const f1 = await get(`${G}${FB_PAGE}/feed?fields=id,created_time,message,comments.summary(true).limit(0)&limit=15&access_token=${tk.pagina}`);
+  const f2 = f1.paging && f1.paging.next ? await get(f1.paging.next) : { data: [] };
+  const fb = [...(f1.data || []), ...(f2.data || [])];
   for (const p of fb) await upsertPost('facebook', p.id, 'recente', p.created_time, p.message);
   await checarContagens('facebook', Object.fromEntries(fb.map(p => [p.id, p.comments && p.comments.summary ? p.comments.summary.total_count : 0])), id => `${G}?ids=${id}&fields=comments.summary(true).limit(0)&access_token=${tk.pagina}`, x => x.comments && x.comments.summary ? x.comments.summary.total_count : 0);
 }
 
 async function checarContagens(rede, jaSei, urlLote, ler) {
+  const LOTE = rede === 'facebook' ? 10 : 50; // a API de Página recusa lote grande ("reduce the amount of data")
   const lista = await vigiados(rede);
   estado.vigiados = lista.length;
   const atual = { ...jaSei };
-  const falta = lista.map(p => p.post_id).filter(id => !(id in atual));
-  for (let i = 0; i < falta.length; i += 50) {
-    const r = await get(urlLote(falta.slice(i, i + 50).join(',')));
+  const falta = rede === 'facebook' ? [] : lista.map(p => p.post_id).filter(id => !(id in atual));
+  for (let i = 0; i < falta.length; i += LOTE) {
+    const r = await get(urlLote(falta.slice(i, i + LOTE).join(',')));
     for (const [id, x] of Object.entries(r)) atual[id] = ler(x);
   }
   for (const p of lista) {
