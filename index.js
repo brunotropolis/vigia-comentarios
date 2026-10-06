@@ -44,11 +44,11 @@ async function get(url) {
 let tk = {}, gatilhos = [], carregadoEm = 0;
 async function carregar() {
   if (Date.now() - carregadoEm < 5 * 60e3) return;
-  const rows = await q("select rede, access_token from conteudo.tokens_social where rede in ('facebook','facebook_motor')");
+  const rows = await q("select rede, access_token from conteudo.tokens_social where rede in ('facebook','facebook_motor','instagram')");
   const t = Object.fromEntries(rows.map(r => [r.rede, r.access_token]));
   const sis = t.facebook_motor || t.facebook;
   const pg = await get(`${G}${FB_PAGE}?fields=access_token&access_token=${sis}`);
-  tk = { leitorIG: t.facebook, pagina: pg.access_token };
+  tk = { leitorIG: t.facebook, pagina: pg.access_token, ig: t.instagram };
   gatilhos = [...new Set((await q("select gatilhos from conteudo.automacoes_social where ativo")).flatMap(r => r.gatilhos || []).map(norm))].filter(Boolean);
   carregadoEm = Date.now();
 }
@@ -163,6 +163,24 @@ async function revisaoDiaria() {
   log('revisão diária: IG posts lidos', n);
 }
 
+// ---- caixa de entrada: busca @/nome/foto dos contatos novos (até 20 por minuto) ----
+async function enriquecer() {
+  await carregar();
+  const lista = await q("select id, rede, usuario_id from conteudo.social_contatos where enriquecido_em is null order by ultimo_em desc limit 20");
+  for (const c of lista) {
+    let d = {};
+    try {
+      d = c.rede === 'instagram'
+        ? await get(`https://graph.instagram.com/v21.0/${c.usuario_id}?fields=username,name,profile_pic&access_token=${tk.ig}`)
+        : await get(`${G}${c.usuario_id}?fields=first_name,last_name,profile_pic&access_token=${tk.pagina}`);
+    } catch (e) { d = { erro: e.message }; }
+    const nome = d.name || [d.first_name, d.last_name].filter(Boolean).join(' ') || null;
+    await q("update conteudo.social_contatos set username=coalesce($2,username), nome=coalesce($3,nome), foto_url=coalesce($4,foto_url), enriquecido_em=now() where id=$1",
+      [c.id, d.username || null, nome, d.profile_pic || null]);
+  }
+  if (lista.length) log('enriquecidos', lista.length);
+}
+
 // ---- laço ----
 async function laco() {
   let proximaRevisao = 0;
@@ -173,6 +191,7 @@ async function laco() {
       if (!estado.pausado) {
         if (VIGIAR_IG && Date.now() > proximaRevisao) { proximaRevisao = Date.now() + 24 * 3600e3; revisaoDiaria().catch(e => { estado.erros++; estado.ultimoErro = 'revisao: ' + e.message; log('erro revisão', e.message); }); }
         await ciclo();
+        if (estado.ciclos % 6 === 0) await enriquecer().catch(e => log('erro enriquecer', e.message));
         estado.ciclos++; estado.ultimoCiclo = new Date().toISOString();
         if (estado.ciclos % 60 === 1) log('vivo — ciclos', estado.ciclos, 'vigiados', estado.vigiados, 'repassados', estado.repassados, 'erros', estado.erros, 'ciclo levou', Date.now() - t0, 'ms');
       }
