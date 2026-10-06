@@ -1,0 +1,9 @@
+{
+  "name": "vigia-comentarios",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vigia comentários IG/FB por consulta e repassa pro Disparador do Motor de Conteúdo",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": { "pg": "^8.13.0" }
+}
