@@ -166,17 +166,26 @@ async function revisaoDiaria() {
 // ---- caixa de entrada: busca @/nome/foto dos contatos novos (até 20 por minuto) ----
 async function enriquecer() {
   await carregar();
-  const lista = await q("select id, rede, usuario_id from conteudo.social_contatos where enriquecido_em is null order by ultimo_em desc limit 20");
+  // novo · ou falhou e a pessoa mandou direct depois (a Meta só libera o perfil com o "consentimento" = direct/clique)
+  // · ou foto velha (link da foto expira) de quem interagiu nos últimos 30 dias
+  const lista = await q(`select id, rede, usuario_id from conteudo.social_contatos where usuario_id not like 'comentario:%' and (
+      enriquecido_em is null
+      or (perfil_erro is not null and ultima_msg_dele > enriquecido_em)
+      or (perfil_erro is null and enriquecido_em < now() - interval '5 days' and ultimo_em > now() - interval '30 days'))
+    order by ultimo_em desc limit 20`);
   for (const c of lista) {
     let d = {};
     try {
       d = c.rede === 'instagram'
-        ? await get(`https://graph.instagram.com/v21.0/${c.usuario_id}?fields=username,name,profile_pic&access_token=${tk.ig}`)
+        ? await get(`https://graph.instagram.com/v21.0/${c.usuario_id}?fields=username,name,profile_pic,is_verified_user,follower_count,is_user_follow_business&access_token=${tk.ig}`)
         : await get(`${G}${c.usuario_id}?fields=first_name,last_name,profile_pic&access_token=${tk.pagina}`);
     } catch (e) { d = { erro: e.message }; }
     const nome = d.name || [d.first_name, d.last_name].filter(Boolean).join(' ') || null;
-    await q("update conteudo.social_contatos set username=coalesce($2,username), nome=coalesce($3,nome), foto_url=coalesce($4,foto_url), enriquecido_em=now() where id=$1",
-      [c.id, d.username || null, nome, d.profile_pic || null]);
+    const erro = d.erro || (d.error && d.error.message) || null;
+    await q(`update conteudo.social_contatos set username=coalesce($2,username), nome=coalesce($3,nome), foto_url=coalesce($4,foto_url),
+        verificado=coalesce($5,verificado), seguidores=coalesce($6,seguidores), segue_voce=coalesce($7,segue_voce), perfil_erro=$8, enriquecido_em=now() where id=$1`,
+      [c.id, d.username || null, nome, d.profile_pic || null, typeof d.is_verified_user === 'boolean' ? d.is_verified_user : null,
+       Number.isFinite(d.follower_count) ? d.follower_count : null, typeof d.is_user_follow_business === 'boolean' ? d.is_user_follow_business : null, erro ? String(erro).slice(0, 200) : null]);
   }
   if (lista.length) log('enriquecidos', lista.length);
 }
