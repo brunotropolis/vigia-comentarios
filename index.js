@@ -88,7 +88,7 @@ async function processarPost(rede, postId, primeiraVez) {
     else if (deFora && new Date(quando).getTime() >= limite && temGatilho(texto)) {
       const payload = rede === 'instagram'
         ? { object: 'instagram', entry: [{ id: IG_ID, time: Date.now(), changes: [{ field: 'comments', value: { id: c.id, text: texto, from: c.from || { username: c.username }, media: { id: postId } } }] }] }
-        : { object: 'page', entry: [{ id: FB_PAGE, time: Date.now(), changes: [{ field: 'feed', value: { item: 'comment', verb: 'add', comment_id: c.id, message: texto, from: c.from, post_id: postId } }] }] };
+        : { object: 'page', entry: [{ id: FB_PAGE, time: Date.now(), via: 'vigia', changes: [{ field: 'feed', value: { item: 'comment', verb: 'add', comment_id: c.id, message: texto, from: c.from, post_id: postId } }] }] };
       const r = await fetch(DISPARADOR, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(ENV.DISPARADOR_SECRET ? { 'x-vigia-secret': ENV.DISPARADOR_SECRET } : {}) }, body: JSON.stringify(payload) });
       resultado = await r.json().catch(async () => ({ status: r.status }));
       acao = 'repassado'; estado.repassados++;
