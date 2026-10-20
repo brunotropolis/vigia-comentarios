@@ -201,6 +201,8 @@ async function laco() {
         if (VIGIAR_IG && Date.now() > proximaRevisao) { proximaRevisao = Date.now() + 24 * 3600e3; revisaoDiaria().catch(e => { estado.erros++; estado.ultimoErro = 'revisao: ' + e.message; log('erro revisão', e.message); }); }
         await ciclo();
         if (estado.ciclos % 6 === 0) await enriquecer().catch(e => log('erro enriquecer', e.message));
+        // sinal de vida pro monitor de saúde do Motor (linha fixa, ativo=false: não entra na vigia)
+        if (estado.ciclos % 6 === 0) await q("insert into conteudo.vigia_posts (rede, post_id, motivo, ativo, atualizado_em) values ('facebook','__vivo__','heartbeat',false,now()) on conflict (rede, post_id) do update set atualizado_em=now()").catch(e => log('erro heartbeat', e.message));
         estado.ciclos++; estado.ultimoCiclo = new Date().toISOString();
         if (estado.ciclos % 60 === 1) log('vivo — ciclos', estado.ciclos, 'vigiados', estado.vigiados, 'repassados', estado.repassados, 'erros', estado.erros, 'ciclo levou', Date.now() - t0, 'ms');
       }
