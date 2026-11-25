@@ -13,6 +13,9 @@ const DISPARADOR = ENV.DISPARADOR_URL || 'https://n8n-n8n.xktssy.easypanel.host/
 const INTERVALO = Number(ENV.INTERVALO_S || 10) * 1000;
 const IG_ID = ENV.IG_ID || '17841403363408251';
 const FB_PAGE = ENV.FB_PAGE_ID || '1753378231566500';
+// páginas do Facebook vigiadas (a 1ª é a principal, usada no perfil dos contatos). Disparador escolhe a marca pela página.
+const FB_PAGES = (ENV.FB_PAGE_IDS || `${FB_PAGE},1401301539738914`).split(',').map(s => s.trim()).filter(Boolean);
+const paginaDo = postId => String(postId).split('_')[0];
 const JANELA_H = Number(ENV.JANELA_RESPOSTA_H || 24);     // comentário mais velho que isso não é respondido
 const QUENTE_DIAS = Number(ENV.QUENTE_DIAS || 60);        // post antigo sai da vigia após N dias sem comentário
 const G = 'https://graph.facebook.com/v21.0/';
@@ -47,8 +50,12 @@ async function carregar() {
   const rows = await q("select rede, access_token from conteudo.tokens_social where rede in ('facebook','facebook_motor','instagram')");
   const t = Object.fromEntries(rows.map(r => [r.rede, r.access_token]));
   const sis = t.facebook_motor || t.facebook;
-  const pg = await get(`${G}${FB_PAGE}?fields=access_token&access_token=${sis}`);
-  tk = { leitorIG: t.facebook, pagina: pg.access_token, ig: t.instagram };
+  const paginas = {};
+  for (const id of FB_PAGES) {
+    try { paginas[id] = (await get(`${G}${id}?fields=access_token&access_token=${sis}`)).access_token; }
+    catch (e) { log('sem token da página', id, e.message); if (id === FB_PAGES[0]) throw e; }
+  }
+  tk = { leitorIG: t.facebook, pagina: paginas[FB_PAGES[0]], paginas, ig: t.instagram };
   gatilhos = [...new Set((await q("select gatilhos from conteudo.automacoes_social where ativo")).flatMap(r => r.gatilhos || []).map(norm))].filter(Boolean);
   carregadoEm = Date.now();
 }
@@ -72,7 +79,7 @@ async function upsertPost(rede, id, motivo, publicado, legenda) {
 async function processarPost(rede, postId, primeiraVez) {
   const lista = rede === 'instagram'
     ? (await get(`${G}${postId}/comments?fields=id,text,timestamp,from,username&limit=50&access_token=${tk.leitorIG}`)).data || []
-    : (await get(`${G}${postId}/comments?order=reverse_chronological&filter=stream&fields=id,message,created_time,from&limit=50&access_token=${tk.pagina}`)).data || [];
+    : (await get(`${G}${postId}/comments?order=reverse_chronological&filter=stream&fields=id,message,created_time,from&limit=50&access_token=${tk.paginas[paginaDo(postId)] || tk.pagina}`)).data || [];
   if (!lista.length) return;
   const ids = lista.map(c => c.id);
   const vistos = new Set((await q("select comment_id from conteudo.vigia_comentarios where rede=$1 and comment_id = any($2)", [rede, ids])).map(r => r.comment_id));
@@ -82,13 +89,13 @@ async function processarPost(rede, postId, primeiraVez) {
     if (vistos.has(c.id)) continue;
     const texto = rede === 'instagram' ? c.text : c.message;
     const quando = c.timestamp || c.created_time;
-    const deFora = rede === 'instagram' ? !(c.from && String(c.from.id) === IG_ID) : !(c.from && String(c.from.id) === FB_PAGE);
+    const deFora = rede === 'instagram' ? !(c.from && String(c.from.id) === IG_ID) : !(c.from && String(c.from.id) === paginaDo(postId));
     let acao = 'ignorado', resultado = null;
     if (primeiraVez) acao = 'semeado';                                   // já existia quando o post entrou na vigia
     else if (deFora && new Date(quando).getTime() >= limite && temGatilho(texto)) {
       const payload = rede === 'instagram'
         ? { object: 'instagram', entry: [{ id: IG_ID, time: Date.now(), changes: [{ field: 'comments', value: { id: c.id, text: texto, from: c.from || { username: c.username }, media: { id: postId } } }] }] }
-        : { object: 'page', entry: [{ id: FB_PAGE, time: Date.now(), via: 'vigia', changes: [{ field: 'feed', value: { item: 'comment', verb: 'add', comment_id: c.id, message: texto, from: c.from, post_id: postId } }] }] };
+        : { object: 'page', entry: [{ id: paginaDo(postId), time: Date.now(), via: 'vigia', changes: [{ field: 'feed', value: { item: 'comment', verb: 'add', comment_id: c.id, message: texto, from: c.from, post_id: postId } }] }] };
       const r = await fetch(DISPARADOR, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(ENV.DISPARADOR_SECRET ? { 'x-vigia-secret': ENV.DISPARADOR_SECRET } : {}) }, body: JSON.stringify(payload) });
       resultado = await r.json().catch(async () => ({ status: r.status }));
       acao = 'repassado'; estado.repassados++;
@@ -114,16 +121,27 @@ async function ciclo() {
   // Facebook: recentes + quentes
   if (!VIGIAR_FB) return;
   // feed em 2 páginas de 15 (lote maior a API recusa); FB só vigia os 30 recentes (consulta por vários ids foi descontinuada)
-  const f1 = await get(`${G}${FB_PAGE}/feed?fields=id,created_time,message,comments.summary(true).limit(0)&limit=15&access_token=${tk.pagina}`);
-  const f2 = f1.paging && f1.paging.next ? await get(f1.paging.next) : { data: [] };
-  const fb = [...(f1.data || []), ...(f2.data || [])];
-  for (const p of fb) await upsertPost('facebook', p.id, 'recente', p.created_time, p.message);
-  await checarContagens('facebook', Object.fromEntries(fb.map(p => [p.id, p.comments && p.comments.summary ? p.comments.summary.total_count : 0])), id => `${G}?ids=${id}&fields=comments.summary(true).limit(0)&access_token=${tk.pagina}`, x => x.comments && x.comments.summary ? x.comments.summary.total_count : 0);
+  let total = 0;
+  for (const pagina of FB_PAGES) {
+    const tok = tk.paginas[pagina];
+    if (!tok) continue;
+    try {
+      const f1 = await get(`${G}${pagina}/feed?fields=id,created_time,message,comments.summary(true).limit(0)&limit=15&access_token=${tok}`);
+      const f2 = f1.paging && f1.paging.next ? await get(f1.paging.next) : { data: [] };
+      const fb = [...(f1.data || []), ...(f2.data || [])];
+      for (const p of fb) await upsertPost('facebook', p.id, 'recente', p.created_time, p.message);
+      total += await checarContagens('facebook', Object.fromEntries(fb.map(p => [p.id, p.comments && p.comments.summary ? p.comments.summary.total_count : 0])), id => `${G}?ids=${id}&fields=comments.summary(true).limit(0)&access_token=${tok}`, x => x.comments && x.comments.summary ? x.comments.summary.total_count : 0, pagina);
+    } catch (e) {
+      if (pagina === FB_PAGES[0]) throw e;               // erro na principal segue o tratamento de sempre
+      estado.erros++; estado.ultimoErro = `pagina ${pagina}: ${e.message}`; log('erro página', pagina, e.message);
+    }
+  }
+  estado.vigiados = total;
 }
 
-async function checarContagens(rede, jaSei, urlLote, ler) {
+async function checarContagens(rede, jaSei, urlLote, ler, pagina) {
   const LOTE = rede === 'facebook' ? 10 : 50; // a API de Página recusa lote grande ("reduce the amount of data")
-  const lista = await vigiados(rede);
+  const lista = (await vigiados(rede)).filter(p => !pagina || paginaDo(p.post_id) === pagina);
   estado.vigiados = lista.length;
   const atual = { ...jaSei };
   const falta = rede === 'facebook' ? [] : lista.map(p => p.post_id).filter(id => !(id in atual));
@@ -138,6 +156,7 @@ async function checarContagens(rede, jaSei, urlLote, ler) {
     if (n > (p.ultimo_count || 0) || primeira) await processarPost(rede, p.post_id, primeira);
     await q("update conteudo.vigia_posts set ultimo_count=$3, ultima_mudanca=now(), atualizado_em=now() where rede=$1 and post_id=$2", [rede, p.post_id, n]);
   }
+  return lista.length;
 }
 
 // ---- revisão diária: post antigo que voltou a receber comentário entra; parado há N dias sai ----
@@ -221,5 +240,5 @@ async function laco() {
 }
 
 http.createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(estado)); }).listen(Number(ENV.PORT || 8000));
-log('vigia-comentarios no ar — intervalo', INTERVALO / 1000, 's | IG', VIGIAR_IG, '| FB', VIGIAR_FB);
+log('vigia-comentarios no ar — intervalo', INTERVALO / 1000, 's | IG', VIGIAR_IG, '| FB', VIGIAR_FB, FB_PAGES.join(','));
 laco();
